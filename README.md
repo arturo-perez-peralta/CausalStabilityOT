@@ -1,6 +1,6 @@
 # Causal Optimal Transport Experiments
 
-![Recourse ignoring causal effects demands higher efforts from high users.](FiguraCausalidad.png)
+<img src="FiguraCausalidad.png" alt="Ignoring causal effects during recourse results in higher efforst from end users" width="500"/>
 
 Optimal Transport for **causal** recourse analysis: three experiments (C1-C3) that
 study how the true latent/causal transport differs from a naive ambient transport.
