@@ -1,4 +1,6 @@
-# fairopt-causal — Causal Optimal Transport Experiments
+# Causal Optimal Transport Experiments
+
+![Recourse ignoring causal effects demands higher efforts from high users.](FiguraCausalidad.png)
 
 Optimal Transport for **causal** recourse analysis: three experiments (C1-C3) that
 study how the true latent/causal transport differs from a naive ambient transport.
