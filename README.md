@@ -7,11 +7,11 @@ study how the true latent/causal transport differs from a naive ambient transpor
 
 ## Experiments
 
-| ID | Module | What it measures | Output CSV |
-|----|--------|------------------|------------|
-| C1 | `c1_causality` | Stability of OT under anisotropic deformations `X = M U`, `M = I + cN`. Tracks conjugacy error `‖T_X − M∘T_U∘M⁻¹‖` and its power-law scaling in the anisotropy ratio `κ = Λ/λ` (2D and 5D) | `results/c1_causality_2d.csv`, `results/c1_causality_5d.csv` |
-| C2 | `c2_recourse_causal` | The cost of causal ignorance: Standard OT vs Causal OT over adult, LSAC, COMPAS, German. True Intervention Effort (latent L2) vs Apparent Cost (ambient L2), mean ± std over 5-fold CV | `results/c2_recourse_causal.csv` |
-| C3 | `c3_causality_real` | Causal OT on the **ecoli70** Gaussian Bayesian network (`run_ecoli70`) and PCA-conjugacy deviation on lsac / student / credit_default (`run`) | `results/c3_causality_ecoli70.csv`, `results/c3_causality_real.csv` |
+| ID | Module | What it measures |
+|----|--------|------------------|
+| C1 | `c1_causality` | Stability of OT under anisotropic deformations `X = M U`, `M = I + cN`. Tracks conjugacy error `‖T_X − M∘T_U∘M⁻¹‖` and its power-law scaling in the anisotropy ratio `κ = Λ/λ` (2D and 5D) |
+| C2 | `c2_comparison` | Comparison against a series of baselines for a collection of benchmark datasets |
+| C3 | `c3_robustness` | Robustness of causal recourse methods unders noise in the underlying structural equations |
 
 ## Project structure
 
@@ -21,8 +21,8 @@ causal/
 │   ├── core/                 # Sinkhorn solver, cost, metrics
 │   ├── data/                 # dataset loaders + preprocessing
 │   ├── utils/                # ILR transform
-│   └── experiments/          # c1_causality, c2_recourse_causal,
-│                             # c3_causality_real, config, runner, run_all
+│   └── experiments/          # c1_causality, c2_comparison,
+│                             # c3_robustness, config, runner, run_all
 ├── tests/                    # pytest suite (sinkhorn, ilr)
 ├── visualization.ipynb       # C1, C2, C3 plots + LaTeX tables
 ├── pyproject.toml            # dependencies
@@ -49,10 +49,8 @@ Each experiment writes CSVs into `results/` (created automatically).
 ```bash
 # single experiments
 python -m fairopt.experiments.c1_causality
-python -m fairopt.experiments.c2_recourse_causal
-python -m fairopt.experiments.c3_causality_real            # run() — real datasets
-python -m fairopt.experiments.c3_causality_real           # __main__ — run_ecoli70()
-python -c "from fairopt.experiments.c3_causality_real import run, run_ecoli70; run(); run_ecoli70()"
+python -m fairopt.experiments.c2_comparison
+python -m fairopt.experiments.c3_robustness
 
 # everything sequentially
 python -m fairopt.experiments.run_all
