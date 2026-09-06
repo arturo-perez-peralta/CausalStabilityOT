@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run all causal experiments (C1-C3) sequentially.
 
-C1: causal OT stability under anisotropic deformations.
-C2: cost of causal ignorance (Standard vs Causal OT) across 4 datasets.
-C3: causal OT on ecoli70 BN data and PCA-conjugacy on real datasets.
+C1: Simulation study.
+C2: Comparison in real-world datasets againts common baselines.
+C3: Robustness study.
 
 Docker default entrypoint: ``python -m fairopt.experiments.run_all``.
 """
@@ -48,10 +48,9 @@ def main() -> None:
     log("=" * 60)
 
     experiments = [
-        ("C1 Causality Simulation", "fairopt.experiments.c1_causality", "run", {}),
-        ("C2 Recourse Causal (CV)", "fairopt.experiments.c2_recourse_causal", "run", {}),
-        ("C3 ecoli70 Causal Graph", "fairopt.experiments.c3_causality_real", "run_ecoli70", {}),
-        ("C3 Real-Data Conjugacy", "fairopt.experiments.c3_causality_real", "run", {"use_cv": False}),
+        ("C1 Causality Simulation", "fairopt.experiments.c1_simulation", "run", {}),
+        ("C2 Recourse Causal (CV)", "fairopt.experiments.c2_comparison", "run_unified_experiments", {}),
+        ("C3 Robustness", "fairopt.experiments.c3_robustness", "run_robustness_experiments", {}),
     ]
 
     successes = 0
