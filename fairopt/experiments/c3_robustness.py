@@ -7,6 +7,7 @@ import numpy as np
 import gzip
 import shutil
 import urllib.request
+import random
 import time
 import argparse
 
@@ -47,6 +48,17 @@ REAL_DATASETS_CFG = {
 
 ALL_DATASETS = BNS + list(REAL_DATASETS_CFG.keys())
 
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
 class MLP(nn.Module):
     def __init__(self, d):
         super().__init__()
@@ -58,6 +70,7 @@ class MLP(nn.Module):
     def forward(self, x):
         return self.net(x).squeeze(-1)
 
+# --- DATA PREPARATION ---
 def load_bn(name: str) -> tuple:
     url = f"https://www.bnlearn.com/bnrepository/{name}/{name}.rda"
     rda_path = Path(f"/tmp/{name}.rda")
@@ -103,14 +116,29 @@ def load_bn(name: str) -> tuple:
 def fit_linear_scm(X: torch.Tensor, chain_order) -> tuple:
     p = X.shape[1]
     X_np = X.numpy()
-    M_x_to_u = np.eye(p)
+    
+    I_minus_B = np.eye(p)
+    std_devs = np.zeros(p)
+    
+    root_idx = chain_order[0]
+    std_devs[root_idx] = np.std(X_np[:, root_idx])
+    
     for k in range(1, p):
         parent_idx, child_idx = chain_order[k - 1], chain_order[k]
+        
         beta = np.linalg.lstsq(X_np[:, parent_idx][:, None], X_np[:, child_idx], rcond=None)[0][0]
-        M_x_to_u[child_idx, parent_idx] = -beta
+        I_minus_B[child_idx, parent_idx] = -beta
+        
+        residual = X_np[:, child_idx] - beta * X_np[:, parent_idx]
+        std_devs[child_idx] = np.std(residual)
+        
+    std_devs[std_devs == 0] = 1.0
+    
+    M_x_to_u = I_minus_B / std_devs[:, None]
     
     M_x_to_u_t = torch.from_numpy(M_x_to_u).float()
     M_u_to_x_t = torch.linalg.inv(M_x_to_u_t) 
+    
     return M_u_to_x_t, M_x_to_u_t
 
 def compute_anisotropy(M: np.ndarray) -> float:
@@ -128,6 +156,13 @@ def get_dataset_data(ds_name: str, n_obs: int = 10000):
         X = torch.randn(n_obs, d) @ M_t.T
         y = (X[:, terminal_idx] > X[:, terminal_idx].median()).numpy().astype(float)
         kappa = compute_anisotropy(M)
+        label = ds_name
+        keep_idx = [i for i in range(d) if i != terminal_idx]
+        X = X[:, keep_idx]
+        M_filtered = M[np.ix_(keep_idx, keep_idx)]
+        M_t = torch.from_numpy(M_filtered).float()
+        M_inv_t = torch.linalg.inv(M_t)
+        kappa = compute_anisotropy(M_filtered)
         label = ds_name
     elif ds_name in REAL_DATASETS_CFG:
         cfg = REAL_DATASETS_CFG[ds_name]
@@ -161,6 +196,7 @@ def get_corrupted_M(B: np.ndarray, std_devs: np.ndarray, mode: str, eps: float, 
         return torch.from_numpy(M_hat).float(), torch.from_numpy(np.linalg.inv(M_hat)).float(), B_hat
     except np.linalg.LinAlgError: return None, None, None
 
+# --- OT EVALUATION ---
 def get_ot_plan_and_cost(source: torch.Tensor, target: torch.Tensor):
     n_src, n_tgt = source.shape[0], target.shape[0]
     mu, nu = np.ones(n_src)/n_src, np.ones(n_tgt)/n_tgt
@@ -205,6 +241,7 @@ def compute_extra_metrics(X_cf_or_plan, X_acc: torch.Tensor, model: nn.Module, i
         
     return confidence, wass_dist
 
+# --- DETERMINISTIC BASELINES ---
 def run_robust_karimi(X_rej, M_hat_t, M_hat_inv_t, model):
     U_rej = X_rej @ M_hat_inv_t.T
     U_cf = U_rej.clone().detach()
@@ -242,7 +279,7 @@ def run_robust_karimi(X_rej, M_hat_t, M_hat_inv_t, model):
     final_X_cf[~is_successful] = current_X[~is_successful].detach()
     return final_X_cf
 
-def solve_single_karimi_hard(x_0_np, u_0_np, B_np, d, W1, b1, W2, b2, W3, b3):
+def solve_single_karimi_hard(x_0_np, u_0_np, M_inv_np, d, W1, b1, W2, b2, W3, b3):
     env = gp.Env(empty=True)
     env.setParam("OutputFlag", 0)
     env.setParam("Threads", 1) 
@@ -264,7 +301,7 @@ def solve_single_karimi_hard(x_0_np, u_0_np, B_np, d, W1, b1, W2, b2, W3, b3):
     m.addConstr(out == W3 @ h2 + b3)
     m.addConstr(out >= 0.01)
     
-    scm_eq = (np.eye(d) - B_np) @ x_prime - u_0_np
+    scm_eq = M_inv_np @ x_prime - u_0_np
     m.addConstr(scm_eq <= M * m_vars)
     m.addConstr(scm_eq >= -M * m_vars)
     
@@ -275,7 +312,7 @@ def solve_single_karimi_hard(x_0_np, u_0_np, B_np, d, W1, b1, W2, b2, W3, b3):
     return torch.from_numpy(x_prime.X).float() if m.status in [GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SUBOPTIMAL] and m.SolCount > 0 else torch.from_numpy(x_0_np).float()
 
 
-def run_robust_karimi_hard(X_rej, M_hat_inv_t, B_hat, model):
+def run_robust_karimi_hard(X_rej, M_hat_inv_t, model):
     X_rej_np, U_rej_np = X_rej.numpy(), (X_rej @ M_hat_inv_t.T).numpy()
     d = X_rej_np.shape[1]
     
@@ -284,29 +321,39 @@ def run_robust_karimi_hard(X_rej, M_hat_inv_t, B_hat, model):
     W3, b3 = model.net[4].weight.data.numpy(), model.net[4].bias.data.numpy()
     
     N_JOBS = 8
-    res = Parallel(n_jobs=N_JOBS)(delayed(solve_single_karimi_hard)(X_rej_np[i], U_rej_np[i], B_hat, d, W1, b1, W2, b2, W3, b3) for i in range(X_rej.shape[0]))
+    M_hat_inv_np = M_hat_inv_t.numpy()
+    res = Parallel(n_jobs=N_JOBS)(delayed(solve_single_karimi_hard)(X_rej_np[i], U_rej_np[i], M_hat_inv_np, d, W1, b1, W2, b2, W3, b3) for i in range(X_rej.shape[0]))
     return torch.stack(res)
 
 def run_robustness_experiments(datasets_to_run=None, baselines_to_run=None, n_obs: int = 3000) -> pd.DataFrame:
     datasets_to_run = datasets_to_run or BNS
     baselines_to_run = baselines_to_run or ["Standard OT", "Causal OT", "Karimi", "Karimi_Hard"]
     
-    eps_noise = [1.5]
+    eps_noise = [0.0, 0.5, 1.0, 1.5, 2.0]
     eps_miss = []
     all_rows = []
 
     for bn_name in datasets_to_run:
-        node_names, B, intercepts, std_devs, M, terminal_idx = load_bn(bn_name)
-        d_bn, M_t = M.shape[0], torch.from_numpy(M).float()
-        M_inv_t = torch.linalg.inv(M_t)
+        node_names, B_full, intercepts, std_devs_full, M_full, terminal_idx = load_bn(bn_name)
+        d_bn_full = M_full.shape[0]
+        M_full_t = torch.from_numpy(M_full).float()
 
         rng = np.random.RandomState(42)
-        X = torch.randn(n_obs, d_bn) @ M_t.T
-        y = (X[:, terminal_idx] > X[:, terminal_idx].median()).numpy().astype(float)
+        X_full = torch.randn(n_obs, d_bn_full) @ M_full_t.T
+        y = (X_full[:, terminal_idx] > X_full[:, terminal_idx].median()).numpy().astype(float)
+
+        keep_idx = [i for i in range(d_bn_full) if i != terminal_idx]
+        X = X_full[:, keep_idx]
+        B = B_full[np.ix_(keep_idx, keep_idx)]
+        std_devs = std_devs_full[keep_idx]
+        M = M_full[np.ix_(keep_idx, keep_idx)]
+        
+        d_bn = len(keep_idx)
+        M_t = torch.from_numpy(M).float()
+        M_inv_t = torch.linalg.inv(M_t)
 
         for fold, (train_idx, val_idx) in enumerate(KFold(n_splits=5, shuffle=True, random_state=42).split(X.numpy())):
             X_train, X_val, y_train, y_val = X[train_idx], X[val_idx], torch.from_numpy(y[train_idx]).float(), torch.from_numpy(y[val_idx]).float()
-
             model = MLP(d_bn)
             optimizer, criterion = optim.Adam(model.parameters(), lr=0.01), nn.BCEWithLogitsLoss()
             for _ in range(100):
@@ -328,6 +375,7 @@ def run_robustness_experiments(datasets_to_run=None, baselines_to_run=None, n_ob
 
             for conf in configs:
                 M_hat_t, M_hat_inv_t, B_hat = get_corrupted_M(B, std_devs, conf["mode"], conf["eps"], rng)
+                
                 if M_hat_t is None: continue
                     
                 row = {"dataset": bn_name, "fold": fold, "error_mode": conf["mode"], "epsilon": conf["eps"]}
@@ -360,7 +408,7 @@ def run_robustness_experiments(datasets_to_run=None, baselines_to_run=None, n_ob
 
                 methods = {}
                 if "Karimi" in baselines_to_run: methods["Karimi"] = lambda: run_robust_karimi(X_rej, M_hat_t, M_hat_inv_t, model)
-                if "Karimi_Hard" in baselines_to_run: methods["Karimi_Hard"] = lambda: run_robust_karimi_hard(X_rej, M_hat_inv_t, B_hat, model)
+                if "Karimi_Hard" in baselines_to_run: methods["Karimi_Hard"] = lambda: run_robust_karimi_hard(X_rej, M_hat_inv_t, B_hat, std_devs, model)
 
                 for m_name, func in methods.items():
                     try:
@@ -380,7 +428,7 @@ def run_robustness_experiments(datasets_to_run=None, baselines_to_run=None, n_ob
                 print(f"[{bn_name} - {conf['mode']} eps={conf['eps']}] Causal OT Latent Effort: {row.get('Causal OT_latent_effort', np.nan):.2f}")
 
     df = pd.DataFrame(all_rows)
-    path = Path(__file__).resolve().parents[3] / "results" / "experiment_bn_robustness.csv"
+    path = Path(__file__).resolve().parents[3] / "results" / "experiment_robustness.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     
     # Sobrescritura selectiva
@@ -402,5 +450,6 @@ if __name__ == "__main__":
     parser.add_argument("--datasets", nargs="+", default=BNS, help="List of datasets to run")
     parser.add_argument("--baselines", nargs="+", default=["Standard OT", "Causal OT", "Karimi", "Karimi_Hard"], help="List of baselines to run")
     args = parser.parse_args()
-    
+
+    set_seed(42)
     run_robustness_experiments(datasets_to_run=args.datasets, baselines_to_run=args.baselines)
